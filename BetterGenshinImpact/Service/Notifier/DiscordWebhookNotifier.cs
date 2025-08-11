@@ -1,12 +1,15 @@
-﻿using System.Net.Http;
+﻿using System.Collections.Generic;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.IO;
-using System.Net.Http.Headers;
+using BetterGenshinImpact.Service.Notification.Model;
+using BetterGenshinImpact.Service.Notification.Model.Enum;
 using BetterGenshinImpact.Service.Notifier.Exception;
 using BetterGenshinImpact.Service.Notifier.Interface;
-using BetterGenshinImpact.Service.Notification.Model;
 using Microsoft.Extensions.Logging;
 using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.Formats.Jpeg;
@@ -17,7 +20,8 @@ namespace BetterGenshinImpact.Service.Notifier;
 
 public class DiscordWebhookNotifier : INotifier
 {
-    private static readonly ILogger<DiscordWebhookNotifier> Logger = App.GetLogger<DiscordWebhookNotifier>();
+    private static readonly ILogger<DiscordWebhookNotifier> Logger =
+        App.GetLogger<DiscordWebhookNotifier>();
 
     private readonly HttpClient _httpClient;
     private readonly string _webhookUrl;
@@ -30,10 +34,16 @@ public class DiscordWebhookNotifier : INotifier
     {
         Png,
         Jpeg,
-        WebP
+        WebP,
     }
 
-    public DiscordWebhookNotifier(HttpClient httpClient, string webhookUrl, string username, string avatarUrl, string imageFormat)
+    public DiscordWebhookNotifier(
+        HttpClient httpClient,
+        string webhookUrl,
+        string username,
+        string avatarUrl,
+        string imageFormat
+    )
     {
         _httpClient = httpClient;
         _webhookUrl = webhookUrl;
@@ -44,7 +54,7 @@ public class DiscordWebhookNotifier : INotifier
         {
             nameof(ImageEncoderEnum.Png) => new PngEncoder(),
             nameof(ImageEncoderEnum.WebP) => new WebpEncoder(),
-            _ => new JpegEncoder()
+            _ => new JpegEncoder(),
         };
     }
 
@@ -58,20 +68,27 @@ public class DiscordWebhookNotifier : INotifier
         var url = _webhookUrl;
         var fileName = $"screenshot.{_imageFormat}";
         var hasScreenshot = content.Screenshot != null;
+        // var isError = content.Event.Contains("error") == true;
+        var isError = content.Result == NotificationEventResult.Fail;
 
         var embed = new DiscordEmbed
         {
             Title = $"{content.Event} | {content.Result}",
-            Description = content.Message,
-            Footer = new DiscordEmbedFooter { Text = content.Timestamp.ToString() },
-            Image = hasScreenshot ? new DiscordEmbedImage { Url = $"attachment://{fileName}" } : null
+            Description = string.IsNullOrWhiteSpace(content.Message) ? null : content.Message,
+            Footer = string.IsNullOrWhiteSpace(content.Timestamp.ToString())
+                ? null
+                : new DiscordEmbedFooter { Text = content.Timestamp.ToString() },
+            Image = hasScreenshot
+                ? new DiscordEmbedImage { Url = $"attachment://{fileName}" }
+                : null,
+            Color = isError ? 0xFF0000 : 0x00FF00,
         };
 
         var payload = new DiscordPayload
         {
             Username = _username,
             AvatarUrl = _avatarUrl,
-            Embeds = new List<DiscordEmbed> { embed }
+            Embeds = [embed],
         };
 
         HttpContent requestContent;
@@ -81,19 +98,23 @@ public class DiscordWebhookNotifier : INotifier
             var multipart = new MultipartFormDataContent();
 
             using var ms = new MemoryStream();
-            await content.Screenshot.SaveAsync(ms, _imageEncoder);
+            await content!.Screenshot!.SaveAsync(ms, _imageEncoder);
             var imageContent = new ByteArrayContent(ms.ToArray());
             imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse($"image/{_imageFormat}");
             multipart.Add(imageContent, "files[0]", fileName);
 
-            var json = JsonContent.Create(payload);
-            multipart.Add(json, "payload_json");
+            var json = JsonSerializer.Serialize(payload);
+            multipart.Add(new StringContent(json), "payload_json");
 
             requestContent = multipart;
         }
         else
         {
-            requestContent = JsonContent.Create(payload);
+            requestContent = new StringContent(
+                JsonSerializer.Serialize(payload),
+                Encoding.UTF8,
+                "application/json"
+            );
         }
 
         try
@@ -125,9 +146,11 @@ public class DiscordWebhookNotifier : INotifier
     private class DiscordEmbed
     {
         [JsonPropertyName("title")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Title { get; set; }
 
         [JsonPropertyName("description")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Description { get; set; }
 
         [JsonPropertyName("image")]
@@ -137,6 +160,9 @@ public class DiscordWebhookNotifier : INotifier
         [JsonPropertyName("footer")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DiscordEmbedFooter? Footer { get; set; }
+
+        [JsonPropertyName("color")]
+        public int Color { get; set; }
     }
 
     private class DiscordEmbedImage
