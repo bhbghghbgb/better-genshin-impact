@@ -1,12 +1,12 @@
-﻿using BetterGenshinImpact.Service.Notifier.Exception;
-using BetterGenshinImpact.Service.Notifier.Interface;
-using System.Net.Http;
+﻿using System.Net.Http;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using BetterGenshinImpact.Service.Notification.Model;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
+using BetterGenshinImpact.Service.Notifier.Exception;
+using BetterGenshinImpact.Service.Notifier.Interface;
+using BetterGenshinImpact.Service.Notification.Model;
 using Microsoft.Extensions.Logging;
 using SixLabors.ImageSharp.Formats;
 using SixLabors.ImageSharp.Formats.Jpeg;
@@ -21,8 +21,8 @@ public class DiscordWebhookNotifier : INotifier
 
     private readonly HttpClient _httpClient;
     private readonly string _webhookUrl;
-    private readonly string _username;
-    private readonly string _avatarUrl;
+    private readonly string? _username;
+    private readonly string? _avatarUrl;
     private readonly string _imageFormat;
     private readonly IImageEncoder _imageEncoder;
 
@@ -33,13 +33,12 @@ public class DiscordWebhookNotifier : INotifier
         WebP
     }
 
-    public DiscordWebhookNotifier(HttpClient httpClient, string webhookUrl, string username, string avatarUrl,
-        string imageFormat)
+    public DiscordWebhookNotifier(HttpClient httpClient, string webhookUrl, string username, string avatarUrl, string imageFormat)
     {
         _httpClient = httpClient;
         _webhookUrl = webhookUrl;
-        _username = username;
-        _avatarUrl = avatarUrl;
+        _username = string.IsNullOrWhiteSpace(username) ? null : username;
+        _avatarUrl = string.IsNullOrWhiteSpace(avatarUrl) ? null : avatarUrl;
         _imageFormat = imageFormat.ToLower();
         _imageEncoder = imageFormat switch
         {
@@ -53,78 +52,53 @@ public class DiscordWebhookNotifier : INotifier
 
     public async Task SendAsync(BaseNotificationData content)
     {
-        // ref: https://discord.com/developers/docs/resources/webhook#execute-webhook
-        if (string.IsNullOrEmpty(_webhookUrl)) throw new NotifierException("Discord webhook URL is not set");
+        if (string.IsNullOrEmpty(_webhookUrl))
+            throw new NotifierException("Discord webhook URL is not set");
 
-        var url = $"{_webhookUrl}?with_components=true";
-        var data = new MultipartFormDataContent("boundary");
+        var url = _webhookUrl;
+        var fileName = $"screenshot.{_imageFormat}";
+        var hasScreenshot = content.Screenshot != null;
 
-        var payloadJson = new
+        var embed = new DiscordEmbed
         {
-            flags = 1 << 15,
-            components = new List<object>(),
-            username = _username,
-            avatar_url = _avatarUrl,
-            attachments = new List<object>(),
+            Title = $"{content.Event} | {content.Result}",
+            Description = content.Message,
+            Footer = new DiscordEmbedFooter { Text = content.Timestamp.ToString() },
+            Image = hasScreenshot ? new DiscordEmbedImage { Url = $"attachment://{fileName}" } : null
         };
 
-        var components = new List<object>([
-            new
-            {
-                type = 10,
-                content = content.Message
-            },
-            new
-            {
-                type = 10,
-                content = $"-# {content.Event} | {content.Result}\n-# {content.Timestamp}"
-            }
-        ]);
-
-        if (content.Screenshot != null)
+        var payload = new DiscordPayload
         {
-            var fileName = $"screenshot.{_imageFormat}";
-            ;
-            payloadJson.attachments.Add(new
-            {
-                id = 0,
-                filename = fileName,
-            });
-            components = new List<object>([
-                new
-                {
-                    type = 9,
-                    components,
-                    accessory = new
-                    {
-                        type = 11,
-                        media = new { url = $"attachment://screenshot.{_imageFormat}" },
-                        description = "Screenshot"
-                    }
-                }
-            ]);
+            Username = _username,
+            AvatarUrl = _avatarUrl,
+            Embeds = new List<DiscordEmbed> { embed }
+        };
 
-            using (var ms = new MemoryStream())
-            {
-                await content.Screenshot.SaveAsync(ms, _imageEncoder);
-                var imageContent = new ByteArrayContent(ms.ToArray());
-                imageContent.Headers.ContentType =
-                    MediaTypeHeaderValue.Parse($"image/{_imageFormat}");
-                data.Add(imageContent, "files[0]", fileName);
-            }
+        HttpContent requestContent;
+
+        if (hasScreenshot)
+        {
+            var multipart = new MultipartFormDataContent();
+
+            using var ms = new MemoryStream();
+            await content.Screenshot.SaveAsync(ms, _imageEncoder);
+            var imageContent = new ByteArrayContent(ms.ToArray());
+            imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse($"image/{_imageFormat}");
+            multipart.Add(imageContent, "files[0]", fileName);
+
+            var json = JsonContent.Create(payload);
+            multipart.Add(json, "payload_json");
+
+            requestContent = multipart;
         }
-
-        payloadJson.components.Add(new
+        else
         {
-            type = 17,
-            components
-        });
-
-        data.Add(JsonContent.Create(payloadJson), "payload_json");
+            requestContent = JsonContent.Create(payload);
+        }
 
         try
         {
-            var response = await _httpClient.PostAsync(url, data);
+            var response = await _httpClient.PostAsync(url, requestContent);
             response.EnsureSuccessStatusCode();
         }
         catch (System.Exception ex)
@@ -132,5 +106,48 @@ public class DiscordWebhookNotifier : INotifier
             Logger.LogDebug("Failed to send message to Discord: {ex}", ex.Message);
             throw new System.Exception("Failed to send message to Discord", ex);
         }
+    }
+
+    private class DiscordPayload
+    {
+        [JsonPropertyName("username")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? Username { get; set; }
+
+        [JsonPropertyName("avatar_url")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? AvatarUrl { get; set; }
+
+        [JsonPropertyName("embeds")]
+        public List<DiscordEmbed> Embeds { get; set; } = new();
+    }
+
+    private class DiscordEmbed
+    {
+        [JsonPropertyName("title")]
+        public string? Title { get; set; }
+
+        [JsonPropertyName("description")]
+        public string? Description { get; set; }
+
+        [JsonPropertyName("image")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DiscordEmbedImage? Image { get; set; }
+
+        [JsonPropertyName("footer")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DiscordEmbedFooter? Footer { get; set; }
+    }
+
+    private class DiscordEmbedImage
+    {
+        [JsonPropertyName("url")]
+        public string? Url { get; set; }
+    }
+
+    private class DiscordEmbedFooter
+    {
+        [JsonPropertyName("text")]
+        public string? Text { get; set; }
     }
 }
