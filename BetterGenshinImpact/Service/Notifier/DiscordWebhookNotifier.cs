@@ -2,6 +2,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -73,11 +74,9 @@ public class DiscordWebhookNotifier : INotifier
 
         var embed = new DiscordEmbed
         {
-            Title = $"{content.Event} | {content.Result}",
-            Description = string.IsNullOrWhiteSpace(content.Message) ? null : content.Message,
-            Footer = string.IsNullOrWhiteSpace(content.Timestamp.ToString())
-                ? null
-                : new DiscordEmbedFooter { Text = content.Timestamp.ToString() },
+            Title = content.Message,
+            Description = $"{content.Event} | {content.Result}",
+            Footer = new DiscordEmbedFooter { Text = content.Timestamp.ToString() },
             Image = hasScreenshot
                 ? new DiscordEmbedImage { Url = $"attachment://{fileName}" }
                 : null,
@@ -103,18 +102,13 @@ public class DiscordWebhookNotifier : INotifier
             imageContent.Headers.ContentType = MediaTypeHeaderValue.Parse($"image/{_imageFormat}");
             multipart.Add(imageContent, "files[0]", fileName);
 
-            var json = JsonSerializer.Serialize(payload);
-            multipart.Add(new StringContent(json), "payload_json");
+            multipart.Add(JsonContent.Create(payload), "payload_json");
 
             requestContent = multipart;
         }
         else
         {
-            requestContent = new StringContent(
-                JsonSerializer.Serialize(payload),
-                Encoding.UTF8,
-                "application/json"
-            );
+            requestContent = JsonContent.Create(payload);
         }
 
         try
